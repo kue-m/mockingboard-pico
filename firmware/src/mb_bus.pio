@@ -1,0 +1,132 @@
+;
+; Structure follows Oliver Schmidt's a2pico2 PIO (MIT, Copyright (c) 2022 Oliver Schmidt,
+; https://github.com/oliverschmidt/a2pico), repinned and trimmed to the single /IOSEL strobe.
+; The [31] settle delays are a2pico2 cycle counts at the same 200 MHz.
+;
+
+.define PIN_IOSEL 16
+.define PIN_PHI0  18
+.define IRQ_WRITE  4          ; pio0 internal: addr SM -> write SM handshake
+.define IRQ_SYNC   0          ; pio1 base flag, raised as (0 + sm_num) via `rel`
+
+; ---------------------------------------------------------------- addr
+.program mb_addr
+.wrap_target
+idle:
+    wait 1 gpio PIN_IOSEL
+    wait 0 gpio PIN_IOSEL          ; our $Cn00 page is being accessed
+    in pins, 10                    ; base GP8: A0-7, /IOSEL, R/W -> autopush(10)
+    jmp pin idle                   ; jmp_pin = R/W; read cycle -> idle
+    irq IRQ_WRITE                  ; write cycle -> wake the write SM
+.wrap
+
+% c-sdk {
+static inline void mb_addr_cfg(pio_sm_config *c) {
+    sm_config_set_in_pins(c, 8);               // A0 = GP8
+    sm_config_set_in_shift(c, false, true, 10);
+    sm_config_set_jmp_pin(c, 17);              // R/W
+}
+%}
+
+; ---------------------------------------------------------------- write
+; the two [31] delays (64 PIO cycles, ~350 ns at 200 MHz incl. the addr->write handoff)
+; capture D0-7 unconditionally after /IOSEL falls.
+.program mb_write
+.wrap_target
+    wait 1 irq IRQ_WRITE [31]      ; wait for + clear the write flag
+    nop [31]                       ; ~64 PIO cyc: let the 6502 present D0-7
+    in pins, 8                     ; base GP0: D0-7 -> autopush(8)
+.wrap
+
+% c-sdk {
+static inline void mb_write_cfg(pio_sm_config *c) {
+    sm_config_set_in_pins(c, 0);               // D0 = GP0
+    sm_config_set_in_shift(c, false, true, 8);
+}
+%}
+
+; ---------------------------------------------------------------- read
+.program mb_read
+.wrap_target
+    pull block                     ; core pushes the byte to return
+    out pins, 8
+    mov pindirs, ~null             ; enable D0-7 as outputs
+    wait 1 gpio PIN_IOSEL          ; hold until /IOSEL rises
+    mov pindirs, null              ; release D0-7 (back to inputs)
+.wrap
+
+% c-sdk {
+static inline void mb_read_cfg(pio_sm_config *c) {
+    sm_config_set_out_pins(c, 0, 8);           // D0 = GP0
+    sm_config_set_out_shift(c, true, false, 8);
+}
+%}
+
+; ---------------------------------------------------------------- read (fail-safe, RP2350)
+; Drives a 0x00 default for the whole read, overwritten by core0's byte when it lands, so a
+; read-response miss reads 0 ("not ready") instead of the floating bus.
+.program mb_read_failsafe
+    set y, 2                       ; match {R/W = 1 (bit1), /IOSEL = 0 (bit0)}
+release:
+    mov pindirs, null
+    mov pins, null                 ; pre-stage 0x00 in the output latch
+idle:
+    wait 1 gpio PIN_IOSEL
+    wait 0 gpio PIN_IOSEL
+    mov x, pins                    ; x = {R/W, /IOSEL}, masked to 2 bits by in_count
+    jmp x!=y idle                  ; drive only a clean read
+chk:
+    mov x, ~status                 ; x = 0 iff TX FIFO empty
+    jmp !x drive
+    pull noblock                   ; drop a stale push from a prior access
+    jmp chk
+drive:
+    mov pindirs, ~null
+.wrap_target
+    pull noblock                   ; OSR = fresh byte, else X (held value; default 0)
+    mov pins, osr
+    mov x, osr
+    jmp pin release                ; /IOSEL high -> done
+.wrap
+
+% c-sdk {
+static inline void mb_read_failsafe_cfg(pio_sm_config *c) {
+    sm_config_set_out_pins(c, 0, 8);
+    sm_config_set_in_pins(c, 16);              // bit0 = /IOSEL (GP16), bit1 = R/W (GP17)
+    sm_config_set_in_pin_count(c, 2);
+    sm_config_set_jmp_pin(c, 16);
+    sm_config_set_mov_status(c, STATUS_TX_LESSTHAN, 1);
+}
+%}
+
+; ---------------------------------------------------------------- phi2 (readable-counter time base)
+; drift-free time base for the software Timer1/Timer2 counters; a DMA mirrors Y to a RAM word.
+.program mb_phi2
+.wrap_target
+phi2_loop:
+    wait 1 gpio PIN_PHI0
+    wait 0 gpio PIN_PHI0           ; one full PHI2 cycle elapsed
+    in y, 32
+    jmp y-- phi2_loop              ; Y-- every cycle (wraps 0 -> 0xFFFFFFFF); loops either way
+.wrap
+
+% c-sdk {
+static inline void mb_phi2_cfg(pio_sm_config *c) {
+    sm_config_set_in_shift(c, false, true, 32);
+}
+%}
+
+; ---------------------------------------------------------------- sync (Timer1 tick)
+; two instances on pio1 (SM0 = VIA1, SM1 = VIA2); `rel` raises each SM's own flag, so independent.
+.program mb_sync
+    pull block                     ; OSR = PHI0-cycle count (the T1 latch value)
+.wrap_target
+    mov x, osr
+loop:
+    wait 1 gpio PIN_PHI0 [31]
+    nop [31]
+    wait 0 gpio PIN_PHI0 [31]
+    nop [31]
+    jmp x-- loop                   ; count down N whole PHI0 cycles
+    irq IRQ_SYNC rel               ; free-run: wraps back and repeats with same N
+.wrap

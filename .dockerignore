@@ -1,0 +1,11 @@
+# Keep the build context small (and .git IN, so the version step can read it).
+firmware/build/
+sim/build/
+sim/host
+sim/test
+sim/test_cov
+sim/out.wav
+sim/out.mp3
+examples/
+.history/
+out/

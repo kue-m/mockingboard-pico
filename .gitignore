@@ -1,0 +1,15 @@
+dist/
+sim/build/
+sim/host
+sim/test
+sim/test_cov
+sim/test_ar
+sim/test_ar_cov
+sim/out.wav
+sim/out.mp3
+.history/
+__pycache__/
+*.pyc
+*.swp
+*~
+.DS_Store

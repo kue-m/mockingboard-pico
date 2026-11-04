@@ -39,6 +39,13 @@ int main(void) {
 #endif
     set_sys_clock_khz(MB_SYSCLK_KHZ, true);
 
+#ifdef PICO_SMPS_MODE_PIN
+    // fixed-PWM mode: lower 3V3 ripple than the default PFM (undefined on Pico 2 W)
+    gpio_init(PICO_SMPS_MODE_PIN);
+    gpio_set_dir(PICO_SMPS_MODE_PIN, GPIO_OUT);
+    gpio_put(PICO_SMPS_MODE_PIN, 1);
+#endif
+
     stdio_init_all();      // USB and UART stdio are both disabled in the ship build
 
 

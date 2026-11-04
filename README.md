@@ -1,12 +1,14 @@
 # Mockingboard Pico
 
-A Mockingboard C-compatible Apple II sound card built on a Raspberry Pi
+A Mockingboard C-compatible stereo sound card for the Apple II built on a Raspberry Pi
 Pico 2 (RP2350), with both AY music and SSI-263 speech. The Pico 2 snoops the
 Apple II peripheral slot bus, emulates the card's two 6522 VIAs and two
 AY-3-8910 PSGs, decodes SSI-263 speech, and outputs stereo PWM audio.
 
 The audio is line-out and most compatible with powered, television, or headphone
 speakers. Unpowered speakers will be quiet.
+
+<img width="480" height="389" alt="Mockingboard Pico (SMD board)" src="board/mockingboard-pico-1.0-smd.jpg" />
 
 ## Tested Software
 
@@ -17,25 +19,29 @@ detection and play methods.
 |-|-|
 |Total Replay|Auto-detection via interrupt timer polling|
 |Berzap!|SSI-263 speech + AY music in the same program|
-|Ultima IV|Manual card setup that stresses interrupt handling|
+|Ultima III / IV|Manual card setup that stresses interrupt handling|
 |Ultima V|Dual-card AY music support|
 |Sweet Micro Systems Speech Development System|The SSI-263 speech synthesizer|
-|Willy Byte|Interrupt-driven SSI-263 speech + music|
-|Independence!|Polled SSI-263 speech + music|
+|Willy Byte In The Digital Dimension|Interrupt-driven SSI-263 speech + AY music|
+|[Independence](https://github.com/WhitneyDesignLabs/independence)|Polled SSI-263 speech + AY music|
+|[SSI-263 Speech Test (dos33fsprogs)](https://github.com/deater/dos33fsprogs)|SSI-263 speech|
+|[Apple // Bejeweled](https://github.com/jeremysrand/a2bejwld)|SSI-263 speech|
 |Apple Cider Spider|AY music|
 |Popeye|AY music|
 |Broadsides|AY music|
 |Bank Street Music Writer|AY music|
 |Skyfox|AY music|
-|Plasmagoria|AY music|
-|Raster Bars|AY music|
-|Not So Cheap Tunes|AY music|
+|[Plasmagoria](http://fr3nch.t0uch.free.fr/)|AY music|
+|[Raster Bars](http://fr3nch.t0uch.free.fr/)|AY music|
+|[(Not So) Cheap Tunes](http://fr3nch.t0uch.free.fr/)|AY music|
 
 These cover both ways a title finds the card (automatic detection and manual
 selection), both audio paths (AY music and SSI-263 speech), and
 interrupt-detection behaviors.
 
 ## Flashing
+
+The latest firmware can be found on the [releases](https://github.com/kue-m/mockingboard-pico/releases) page.
 
 Remove the Mockingboard Pico from the Apple II before connecting it to USB.
 

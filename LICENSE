@@ -19,19 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-This project also incorporates third-party components, each under its own MIT
-license:
-
-- firmware/vendor/emu2149/   - AY-3-8910 / YM2149 emulation core (see its LICENSE).
-- firmware/vendor/ssi263/    - SSI-263 speech engine and phoneme ROM, from the
-                               ssi263-speech project, Copyright (c) 2026 Tamas
-                               Geczy (see its LICENSE and NOTICE.md).
-- firmware/src/mb_audio.c, mb_audio.h
-                             - adapted from pico-56, Copyright (c) 2023 Troy
-                               Schrapel (https://github.com/visrealm/pico-56).
-- firmware/src/mb_bus.c, mb_bus.pio
-                             - bus snoop derived from a2pico2, Copyright (c) 2022
-                               Oliver Schmidt (https://github.com/oliverschmidt/a2pico).

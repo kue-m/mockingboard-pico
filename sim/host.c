@@ -42,24 +42,21 @@ static void ay_drain(void) {
     }
 }
 
-static uint8_t g_wdata, g_rdata;
+static uint8_t g_wdata;
 static bool    g_irq;
-static void  (*g_tick)(int) = NULL;
 void    mb_bus_irq(bool a)                   { g_irq = a; }
 uint8_t mb_bus_get_wdata(void)               { return g_wdata; }
-void    mb_bus_put_rdata(uint8_t d)          { g_rdata = d; }
-void    mb_sync_init(void (*cb)(int))        { g_tick = cb; }
-struct { uint32_t period; double acc; bool run; } tmr[2];
-void    mb_sync_restart(int ch, uint32_t n)  { tmr[ch].period = n; tmr[ch].run = (n > 0); tmr[ch].acc = 0; }
 static uint32_t g_phi2 = 0;
 uint32_t mb_phi2_ticks(void)                 { return g_phi2; }
-void mb_alarm_init(void (*cb)(int))          { (void)cb; }
-void mb_alarm_arm(int ch, uint32_t n)        { (void)ch; (void)n; }
-int  mb_alarm_irq(void)                      { return -1; }
-int  mb_ar_tick_init(void (*cb)(void))       { (void)cb; return -1; }
+volatile uint8_t mb_rtable[256];
+bool     mb_t1_arm(int ch, uint32_t w, uint16_t n) { (void)ch; (void)w; (void)n; return false; }
+void     mb_t1_latch(int ch, uint16_t n)           { (void)ch; (void)n; }
+bool     mb_t2_arm(int ch, uint32_t w, uint16_t n) { (void)ch; (void)w; (void)n; return false; }
+void     mb_t2_hold(int ch, uint16_t n)            { (void)ch; (void)n; }
+uint32_t mb_timer_ticks(void)                      { return 0; }
 void    speech_post(int c, int reg, uint8_t v) { (void)c; (void)reg; (void)v; }
 uint8_t speech_ar(int c)                       { (void)c; return 0; }
-uint8_t speech_ar_edges(int c)                       { (void)c; return 0; }
+uint8_t speech_ar_edges(int c)                 { (void)c; return 0; }
 
 static void busw(int chan, uint8_t off, uint8_t data) {
     g_wdata = data;

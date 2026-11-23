@@ -42,7 +42,9 @@ static void ay_drain(void) {
         uint8_t v  = cmd & 0xFF;
         switch (op) {
             case AY_OP_REG:   ch ? audioWritePsg1Reg(v) : audioWritePsg0Reg(v); break;
-            case AY_OP_DATA:  ch ? audioWritePsg1(v)    : audioWritePsg0(v);    break;
+            case AY_OP_DATA:
+                ch ? audioWritePsg1(v) : audioWritePsg0(v);
+                break;
             case AY_OP_RESET: ch ? audioResetPsg1()     : audioResetPsg0();     break;
         }
     }
@@ -53,6 +55,7 @@ static PSG*    psg1 = NULL;
 static uint    audioSlice = 0;
 static uint8_t psg0Reg = 0;
 static uint8_t psg1Reg = 0;
+
 static int     g_sampleUs = 20;
 static int     g_sampleRate = 50000;
 
@@ -143,6 +146,7 @@ static void fill_buffer(int b) {
     for (int i = 0; i < SAMP_BUF; i++)
         dmabuf[b][i] = next_sample_word();
 }
+
 
 static void __not_in_flash_func(dma_irq)(void) {
     if (dma_hw->ints0 & (1u << dma_a)) {

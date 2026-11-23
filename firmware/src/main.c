@@ -33,7 +33,6 @@ static void core1_main(void) {
 }
 
 int main(void) {
-    // 200 MHz keeps the slot read-response inside the 6502's ~0.5 us window.
 #ifndef MB_SYSCLK_KHZ
 #define MB_SYSCLK_KHZ 200000
 #endif
@@ -59,8 +58,8 @@ int main(void) {
     mb_bus_reset_handler(mb_via_reset);
     mb_bus_reset_start();
 
-    // frozen ASM fast-path for Timer1 reads, all else tail-calls mb_via_access
     while (true) {
-        mb_bus_dispatch(mb_bus_get_access());
+        mb_via_poll();
+        if (mb_bus_access_pending()) mb_via_access(mb_bus_get_access());
     }
 }

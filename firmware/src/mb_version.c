@@ -14,30 +14,18 @@ bi_decl(bi_program_version_string(MB_VERSION_STR));   // so `picotool info` repo
 static const char VERSION[] = MB_VERSION_STR;
 #define VLEN (sizeof(VERSION) - 1)
 
-static bool     armed;
-static uint16_t rp;
+static uint8_t page;
 
-uint8_t mb_version_read_byte(void) {
-    if (!armed) {                                 // auto-arm on the first read
-        armed = true;
-        rp    = 0;
+
+
+void mb_info_select_page(uint8_t p) {
+    page = p;
+}
+
+uint8_t mb_info_stage(uint8_t i) {
+    if (page == MB_INFO_PAGE_VERSION) {
+        if (i >= MB_VERSION_STR_LEN) return MB_INFO_NONE;
+        return (uint8_t)(i < VLEN ? VERSION[i] : ' ');
     }
-    return (uint8_t)(rp < VLEN ? VERSION[rp] : ' ');   // past the end, space-pad to the fixed width
-}
-
-bool mb_version_armed(void) {
-    return armed;
-}
-
-void mb_version_advance(void) {
-    if (!armed) return;
-    if (++rp >= MB_VERSION_READ_LEN) {            // fixed-length field consumed -> disarm
-        armed = false;
-        rp    = 0;
-    }
-}
-
-void mb_version_disarm(void) {
-    armed = false;
-    rp    = 0;
+    return MB_INFO_NONE;
 }

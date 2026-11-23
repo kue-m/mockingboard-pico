@@ -5,19 +5,13 @@
 #include "mb_bus.h"
 #include "mb_pins.h"
 #include "hardware/clocks.h"
-#include "hardware/irq.h"
 #include "hardware/gpio.h"
-#include "hardware/timer.h"
 #include "hardware/dma.h"
-#include "pico/time.h"
 #include "mb_bus.pio.h"
 
-#define N_BUS_SM 3
+#define N_BUS_SM 4
+#define MB_IRQ_READ 5u    // raddr->table-read doorbell, must match IRQ_READ in mb_bus.pio
 #define MB_IRQ_WRITE 4u   // addr->write doorbell, must match IRQ_WRITE in mb_bus.pio
-
-static uint          sync_off;
-static pio_sm_config sync_cfg;
-static void        (*g_tick_cb)(int chan) = NULL;
 
 // (re)applied by mb_reset_isr on /RES
 static struct {
@@ -27,8 +21,6 @@ static struct {
 
 static void (*g_reset_cb)(bool asserted) = NULL;
 
-// PHI2 cycle-count time base: pio1 SM2 counts PHI0 edges (a scaled SysTick's +/-1 jitter breaks
-// timer-calibration detection). A DMA mirrors RX into a RAM word.
 volatile uint32_t g_phi2_mirror;
 // must be <= 0x0FFFFFFF: RP2350 TRANS_COUNT is COUNT[0-27]+MODE[28-31], so 1<<28 sets a mode bit + zero count (freezes the mirror). 1<<27 = ~134M transfers (~130 s).
 static const    uint32_t g_phi2_reload = 1u << 27;
@@ -63,78 +55,125 @@ static void mb_phi2_start(void) {
     dma_channel_start(dma_mirror);
 }
 
-// mb_phi2_ticks() is inlined in mb_bus.h (critical path). Y counts down, negate for an up-counter.
+// 256-aligned so the raddr SM can push base|index as a complete DMA pointer.
+__attribute__((aligned(256))) volatile uint8_t mb_rtable[256];
 
-// one hardware alarm serves both VIA Timer2s. The VIA model masks it (via_lock) while editing IFR.
-#define T2_DUE_SLACK_US 2                 // window for near-coincident deadlines
-static void   (*g_t2_cb)(int chan) = NULL;
-static int      t2_alarm = -1;
-static uint64_t t2_deadline_us[2];        // 0 = inactive
+static int dma_raddr = -1, dma_rbyte = -1;
 
-static void __not_in_flash_func(t2_reschedule)(void) {
-    uint64_t best = 0;
-    for (int c = 0; c < 2; c++)
-        if (t2_deadline_us[c] && (best == 0 || t2_deadline_us[c] < best)) best = t2_deadline_us[c];
-    if (best) hardware_alarm_set_target(t2_alarm, from_us_since_boot(best));
-    else      hardware_alarm_cancel(t2_alarm);
+// raddr SM's Y = table base >> 8. pio_sm_init clears it, so this follows every (re)init.
+static void raddr_load_base(void) {
+    pio_sm_put(pio0, MB_SM_RADDR, (uint32_t)(uintptr_t)mb_rtable >> 8);
+    pio_sm_exec(pio0, MB_SM_RADDR, pio_encode_pull(false, true));
+    pio_sm_exec(pio0, MB_SM_RADDR, pio_encode_mov(pio_y, pio_osr));
 }
 
-static void __not_in_flash_func(t2_alarm_isr)(uint num) {
-    (void)num;
-    uint64_t now = to_us_since_boot(get_absolute_time());
-    for (int c = 0; c < 2; c++) {
-        if (t2_deadline_us[c] && t2_deadline_us[c] <= now + T2_DUE_SLACK_US) {
-            t2_deadline_us[c] = 0;
-            if (g_t2_cb) g_t2_cb(c);
-        }
+static void table_read_dma_start(void) {
+    dma_raddr = dma_claim_unused_channel(true);
+    dma_rbyte = dma_claim_unused_channel(true);
+
+    dma_channel_config b = dma_channel_get_default_config(dma_rbyte);
+    channel_config_set_transfer_data_size(&b, DMA_SIZE_8);
+    channel_config_set_read_increment(&b, false);
+    channel_config_set_write_increment(&b, false);
+    channel_config_set_high_priority(&b, true);
+    dma_channel_configure(dma_rbyte, &b, &pio0->txf[MB_SM_READ], mb_rtable, 1, false);
+
+    dma_channel_config a = dma_channel_get_default_config(dma_raddr);
+    channel_config_set_transfer_data_size(&a, DMA_SIZE_32);
+    channel_config_set_read_increment(&a, false);
+    channel_config_set_write_increment(&a, false);
+    channel_config_set_dreq(&a, pio_get_dreq(pio0, MB_SM_RADDR, false));
+    channel_config_set_high_priority(&a, true);
+    dma_channel_configure(dma_raddr, &a, &dma_hw->ch[dma_rbyte].al3_read_addr_trig,
+        &pio0->rxf[MB_SM_RADDR], dma_encode_endless_transfer_count(), true);
+}
+
+static uint          t1_off, t2_off;
+static pio_sm_config t1_cfg, t2_cfg;
+
+static void counter_dma_start(PIO pio, uint sm, volatile uint8_t *dst) {
+    int ch = dma_claim_unused_channel(true);
+    dma_channel_config c = dma_channel_get_default_config(ch);
+    channel_config_set_transfer_data_size(&c, DMA_SIZE_16);
+    channel_config_set_read_increment(&c, false);
+    channel_config_set_write_increment(&c, false);
+    channel_config_set_dreq(&c, pio_get_dreq(pio, sm, false));
+    dma_channel_configure(ch, &c, dst, &pio->rxf[sm], dma_encode_endless_transfer_count(), true);
+}
+
+static uint32_t t1_value(uint16_t n, uint32_t d) {
+    uint32_t p = (d - 1u) % ((uint32_t)n + 2u);
+    return p <= n ? (uint32_t)n - p : 0xFFFFFFFFu;
+}
+static uint32_t t2_value(uint16_t n, uint32_t d) {
+    return (uint32_t)n - (d - 1u);
+}
+
+// A PHI0 fall reaches g_phi2_mirror about 10 system clocks late (synchronizer, push, DMA).
+#define PHI2_MIRROR_LAG_CLOCKS 32
+
+// Repeats until e is unchanged across the start, so a PHI0 fall during it cannot push a value a cycle late.
+static uint32_t counter_start(PIO pio, uint sm, uint start, const pio_sm_config *cfg, bool t1,
+                              uint16_t n, uint32_t w) {
+    uint32_t e = 0;
+    for (int tries = 0; tries < 4; tries++) {
+        pio_sm_init(pio, sm, start, cfg);
+        pio_interrupt_clear(pio, sm);
+        e = mb_phi2_ticks();
+        uint32_t d = e + 1u - w;
+        if (t1) pio_sm_put(pio, sm, n);
+        pio_sm_put(pio, sm, t1 ? t1_value(n, d) : t2_value(n, d));
+        pio_sm_set_enabled(pio, sm, true);
+        busy_wait_at_least_cycles(PHI2_MIRROR_LAG_CLOCKS);
+        if (mb_phi2_ticks() == e) break;
     }
-    t2_reschedule();
+    return e;
 }
 
-void mb_alarm_init(void (*t2_cb)(int chan)) {
-    g_t2_cb = t2_cb;
-    t2_deadline_us[0] = t2_deadline_us[1] = 0;
-    t2_alarm = hardware_alarm_claim_unused(true);
-    hardware_alarm_set_callback(t2_alarm, t2_alarm_isr);
+bool __not_in_flash_func(mb_t1_arm)(int chan, uint32_t w, uint16_t n) {
+    uint32_t e = counter_start(pio1, (uint)chan, t1_off + mb_t1_offset_start, &t1_cfg, true, n, w);
+    return e - w >= (uint32_t)n + 2u;
 }
 
-void __not_in_flash_func(mb_alarm_arm)(int chan, uint32_t phi2_cycles) {
-    if (phi2_cycles == 0) {               // cancel this channel
-        t2_deadline_us[chan] = 0;
-        t2_reschedule();
-        return;
+void __not_in_flash_func(mb_t1_latch)(int chan, uint16_t n) {
+    if (!pio_sm_is_tx_fifo_full(pio1, (uint)chan)) pio_sm_put(pio1, (uint)chan, n);
+}
+
+bool __not_in_flash_func(mb_t2_arm)(int chan, uint32_t w, uint16_t n) {
+    uint32_t e = counter_start(pio2, (uint)chan, t2_off + mb_t2_offset_start, &t2_cfg, false, n, w);
+    return e - w >= (uint32_t)n + 2u;
+}
+
+void __not_in_flash_func(mb_t2_hold)(int chan, uint16_t n) {
+    pio_sm_set_enabled(pio2, (uint)chan, false);
+    pio_sm_clear_fifos(pio2, (uint)chan);
+    uint8_t i = (uint8_t)(chan ? 0x88 : 0x08);
+    mb_rtable[i]     = (uint8_t)n;
+    mb_rtable[i + 1] = (uint8_t)(n >> 8);
+}
+
+uint32_t __not_in_flash_func(mb_timer_ticks)(void) {
+    uint32_t t = (pio1->irq & 3u) | ((pio2->irq & 3u) << 2);
+    for (uint ch = 0; ch < 2; ch++) {
+        if (t & MB_TICK_T1(ch)) pio_interrupt_clear(pio1, ch);
+        if (t & MB_TICK_T2(ch)) pio_interrupt_clear(pio2, ch);
     }
-    // off the bus-read hot path (T2C-H write only), so a 64-bit divide is fine
-    uint64_t us = ((uint64_t)phi2_cycles * 1000000ull + 510242ull) / 1020484ull;
-    t2_deadline_us[chan] = to_us_since_boot(get_absolute_time()) + (us ? us : 1);
-    t2_reschedule();
+    return t;
 }
 
-int mb_alarm_irq(void) {
-    return (t2_alarm >= 0) ? (int)hardware_alarm_get_irq_num((uint)t2_alarm) : -1;
-}
-
-// self-rearming poll -> mb_via_ar_poll. ~250 us << phoneme duration, so CA1 latency is inaudible.
-#define AR_POLL_US 250
-static void (*g_ar_cb)(void) = NULL;
-static int      ar_alarm = -1;
-
-static void __not_in_flash_func(ar_alarm_isr)(uint num) {
-    if (g_ar_cb) g_ar_cb();
-    hardware_alarm_set_target((uint)num, make_timeout_time_us(AR_POLL_US));
-}
-
-int mb_ar_tick_init(void (*cb)(void)) {
-    g_ar_cb = cb;
-    ar_alarm = hardware_alarm_claim_unused(true);
-    hardware_alarm_set_callback((uint)ar_alarm, ar_alarm_isr);
-    hardware_alarm_set_target((uint)ar_alarm, make_timeout_time_us(AR_POLL_US));
-    return (int)hardware_alarm_get_irq_num((uint)ar_alarm);
-}
-
-static void __not_in_flash_func(mb_sync_isr)(void) {
-    if (pio1->irq & (1u << 0)) { pio_interrupt_clear(pio1, 0); if (g_tick_cb) g_tick_cb(0); }
-    if (pio1->irq & (1u << 1)) { pio_interrupt_clear(pio1, 1); if (g_tick_cb) g_tick_cb(1); }
+static void counters_init(void) {
+    t1_off = pio_add_program(pio1, &mb_t1_program);
+    t1_cfg = mb_t1_program_get_default_config(t1_off);
+    mb_t1_cfg(&t1_cfg);
+    pio_claim_sm_mask(pio2, 0b0011);
+    t2_off = pio_add_program(pio2, &mb_t2_program);
+    t2_cfg = mb_t2_program_get_default_config(t2_off);
+    mb_t2_cfg(&t2_cfg);
+    for (int ch = 0; ch < 2; ch++) {
+        uint8_t i = (uint8_t)(ch ? 0x80 : 0x00);
+        counter_dma_start(pio1, (uint)ch, &mb_rtable[i | 0x04]);
+        counter_dma_start(pio2, (uint)ch, &mb_rtable[i | 0x08]);
+    }
 }
 
 // mirrors a2pico2's a2_reset
@@ -142,7 +181,7 @@ static void __not_in_flash_func(mb_reset_isr)(uint gpio, uint32_t events) {
     (void)gpio;
     if (events & GPIO_IRQ_EDGE_FALL) {
         // reset asserted: get off the bus mid-cycle, then zero the model
-        pio_set_sm_mask_enabled(pio0, 0b0111, false);
+        pio_set_sm_mask_enabled(pio0, (1u << N_BUS_SM) - 1u, false);
         pio_sm_set_pindirs_with_mask(pio0, 0, 0, 0xFFu << PIN_DATA_BASE);  // D0-7 -> input
         if (g_reset_cb) g_reset_cb(true);
     } else if (events & GPIO_IRQ_EDGE_RISE) {
@@ -150,10 +189,10 @@ static void __not_in_flash_func(mb_reset_isr)(uint gpio, uint32_t events) {
         for (uint sm = 0; sm < N_BUS_SM; sm++) {
             pio_sm_init(pio0, sm, bus_sm[sm].offset, &bus_sm[sm].config);
         }
-#ifdef MB_FAILSAFE_READ
         pio_interrupt_clear(pio0, MB_IRQ_WRITE);   // pio_sm_init does not clear PIO IRQ flags
-#endif
-        pio_set_sm_mask_enabled(pio0, 0b0111, true);
+        pio_interrupt_clear(pio0, MB_IRQ_READ);
+        raddr_load_base();
+        pio_set_sm_mask_enabled(pio0, (1u << N_BUS_SM) - 1u, true);
         if (g_reset_cb) g_reset_cb(false);
     }
 }
@@ -184,7 +223,7 @@ void mb_bus_init(void) {
     }
 
     // SMs stay idle until reset_start
-    pio_claim_sm_mask(pio0, 0b0111);
+    pio_claim_sm_mask(pio0, (1u << N_BUS_SM) - 1u);
 
     bus_sm[MB_SM_ADDR].offset = pio_add_program(pio0, &mb_addr_program);
     bus_sm[MB_SM_ADDR].config = mb_addr_program_get_default_config(bus_sm[MB_SM_ADDR].offset);
@@ -194,42 +233,18 @@ void mb_bus_init(void) {
     bus_sm[MB_SM_WRITE].config = mb_write_program_get_default_config(bus_sm[MB_SM_WRITE].offset);
     mb_write_cfg(&bus_sm[MB_SM_WRITE].config);
 
-#ifdef MB_FAILSAFE_READ
-    bus_sm[MB_SM_READ].offset = pio_add_program(pio0, &mb_read_failsafe_program);
-    bus_sm[MB_SM_READ].config = mb_read_failsafe_program_get_default_config(bus_sm[MB_SM_READ].offset);
-    mb_read_failsafe_cfg(&bus_sm[MB_SM_READ].config);
-#else
-    bus_sm[MB_SM_READ].offset = pio_add_program(pio0, &mb_read_program);
-    bus_sm[MB_SM_READ].config = mb_read_program_get_default_config(bus_sm[MB_SM_READ].offset);
-    mb_read_cfg(&bus_sm[MB_SM_READ].config);
-#endif
+    bus_sm[MB_SM_READ].offset = pio_add_program(pio0, &mb_read_table_program);
+    bus_sm[MB_SM_READ].config = mb_read_table_program_get_default_config(bus_sm[MB_SM_READ].offset);
+    mb_read_table_cfg(&bus_sm[MB_SM_READ].config);
+    bus_sm[MB_SM_RADDR].offset = pio_add_program(pio0, &mb_raddr_program);
+    bus_sm[MB_SM_RADDR].config = mb_raddr_program_get_default_config(bus_sm[MB_SM_RADDR].offset);
+    mb_raddr_cfg(&bus_sm[MB_SM_RADDR].config);
 
     // pio1: Timer1 counters (SM0/1) + free-running PHI2 edge counter (SM2)
     pio_claim_sm_mask(pio1, 0b0111);
-    sync_off = pio_add_program(pio1, &mb_sync_program);
-    sync_cfg = mb_sync_program_get_default_config(sync_off);
+    counters_init();
+    table_read_dma_start();
     mb_phi2_start();
-}
-
-void mb_sync_init(void (*tick_cb)(int chan)) {
-    g_tick_cb = tick_cb;
-    pio_set_irq0_source_enabled(pio1, pis_interrupt0, true);   // flag 0 = VIA1
-    pio_set_irq0_source_enabled(pio1, pis_interrupt1, true);   // flag 1 = VIA2
-    irq_set_exclusive_handler(PIO1_IRQ_0, mb_sync_isr);
-    irq_set_enabled(PIO1_IRQ_0, true);
-}
-
-void __not_in_flash_func(mb_sync_restart)(int chan, uint32_t phi0_cycles) {
-    uint sm = chan ? MB_SM_SYNC1 : MB_SM_SYNC0;
-    pio_sm_set_enabled(pio1, sm, false);
-    if (phi0_cycles == 0) {
-        return;   // 0 stops this channel's Timer1
-    }
-    pio_sm_clear_fifos(pio1, sm);
-    pio_sm_init(pio1, sm, sync_off, &sync_cfg);
-    // mb_sync runs X+1 PHI0 cycles/tick. A 6522 free-run Timer1 fires every N+2 PHI2, so X = N+1.
-    pio1->txf[sm] = phi0_cycles + 1;
-    pio_sm_set_enabled(pio1, sm, true);
 }
 
 void mb_bus_reset_handler(void (*handler)(bool asserted)) {

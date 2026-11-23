@@ -3,7 +3,7 @@
 A Mockingboard C-compatible stereo sound card for the Apple II built on a Raspberry Pi
 Pico 2 (RP2350), with both AY music and SSI-263 speech. The Pico 2 snoops the
 Apple II peripheral slot bus, emulates the card's two 6522 VIAs and two
-AY-3-8910 PSGs, decodes SSI-263 speech, and outputs stereo PWM audio.
+AY-3-8913 PSGs, decodes SSI-263 speech, and outputs stereo PWM audio.
 
 The audio is line-out and most compatible with powered, television, or headphone
 speakers. Unpowered speakers will be quiet.
@@ -43,13 +43,14 @@ interrupt-detection behaviors.
 
 The latest firmware can be found on the [releases](https://github.com/kue-m/mockingboard-pico/releases) page.
 
-Remove the Mockingboard Pico from the Apple II before connecting it to USB.
+Remove the Mockingboard Pico from the Apple II before connecting it to USB (this
+step is optional if your board is version 1.1 or later).
 
-1. Connect the Pico 2 to a computer with a Micro USB cable while holding the
-   BOOTSEL button.
+1. Connect the Mockingboard Pico to a computer with a Micro USB cable while holding
+   the BOOTSEL button.
 2. Release BOOTSEL. A new drive for the RP2350 will appear.
 3. Copy `mockingboard_pico.uf2` onto that drive.
-4. The Pico 2 will reboot into the new firmware automatically.
+4. The Mockingboard Pico will reboot into the new firmware automatically.
 
 ## Version
 
@@ -57,7 +58,8 @@ There are two methods of printing the firmware version:
 
 1. Run `mbpico-version-check.po` on your Apple II and type the Mockingboard Pico's
 slot number when prompted.
-2. Use `picotool info` to read the UF2's binary info.
+2. Connect the Mockingboard Pico to your computer while holding BOOTSEL
+   and run [`picotool info`](https://github.com/raspberrypi/picotool) to read the firmware info.
 
 Modified or untagged releases report the commit hash after the version number.
 
@@ -66,7 +68,7 @@ Modified or untagged releases report the commit hash after the version number.
 ### Docker
 
 To build without installing a toolchain (via pinned pico-sdk 2.2.0, picotool
-2.2.0, and Arm GCC):
+2.2.0, and Debian's Arm GCC):
 
 ```
 docker build -o dist .
@@ -95,7 +97,7 @@ The gerbers and schematic are provided in `board/` for custom printing and assem
 
 |Reference|Part|Notes|
 |-|-|-|
-|U1|Raspberry Pi Pico 2|-|
+|U1|Raspberry Pi Pico 2|Use headers to raise Pico 2|
 |J1|PJ-320F audio jack|Use the [3-pin variant](https://a.co/d/068c63gA)|
 |C1-C4|10nF ceramic capacitor|Labeled `103`|
 |C5|100nF ceramic capacitor|Labeled `104`|
@@ -121,37 +123,38 @@ GPIOs so a PIO state machine can latch the whole bus in one instruction.
 |GP18|PHI0|Input; phase-0 bus clock|
 |GP19|/RES|Input; low = Apple II reset|
 |GP20|/IRQ|Open-drain output; interrupt request|
-|GP26|PWM L|Audio output, left (ADC-only pin)|
-|GP27|PWM R|Audio output, right (ADC-only pin)|
+|GP26|PWM L|Audio output, left (not 5 V tolerant)|
+|GP27|PWM R|Audio output, right (not 5 V tolerant)|
 
 ### Firmware
 
-The two cores are split by role: core0 services the slot bus in a tight loop while
-core1 runs from RAM and renders audio. A lock-free queue links them, so neither core
-stalls the other.
+The two cores are split by role: core0 applies slot accesses in a tight loop while
+core1 renders audio, both running from RAM. A lock-free queue links them, so neither
+core stalls the other.
 
-core0 drives three PIO state machines, all on one PIO. On the falling edge of
+The slot bus runs on four PIO state machines, all on one PIO. On the falling edge of
 `/IOSEL` the *addr* machine latches the address, `/IOSEL` and R/W. On a write the
 *write* machine captures D0-D7 after a fixed settle delay (about 320 ns at 200 MHz).
-On a read the *read* machine drives D0-D7 with a core-supplied byte for as long as
-`/IOSEL` is asserted. A second PIO runs the two 6522 Timer1 counters and a
-free-running bus-cycle counter.
+On a read the *raddr* machine points DMA at that address's byte in a 256-byte response
+table, and the *read* machine drives it on D0-D7 for as long as `/IOSEL` is asserted,
+with no core involved. A second PIO runs the two 6522 Timer1 counters and a
+free-running bus-cycle counter, and a third runs the two Timer2 counters.
 
-Each access is serviced against a behaviorally faithful W65C22 VIA model
-(`firmware/src/mb_via.c`). The two modeled VIAs feed two AY-3-8910 PSGs (the
-`emu2149` core) across a lock-free queue, and core1 mixes them to stereo PWM audio.
+Each access is applied to a behaviorally faithful W65C22 VIA model
+(`firmware/src/mb_via.c`), which keeps the response table current. The two modeled
+VIAs feed two AY-3-8913 PSGs (the `emu2149` core) across a lock-free queue, and core1
+mixes them to stereo PWM audio.
 SSI-263 speech is decoded separately (`firmware/src/mb_speech_bus.c`) and
 synthesized in real time (`firmware/vendor/ssi263/`); a periodic core0 poll turns
 its A/R request into a 6522 CA1 interrupt.
 
-Reading the Timer1 counter (`$Cn04`/`$Cn05`) is the one timing-critical access:
-titles that auto-detect the card read it back-to-back and expect a fixed response
-time. It is answered by a frozen hand-written assembly fast-path
-(`firmware/src/mb_fastread.S`) whose instruction sequence cannot shift when
-surrounding code is recompiled.
+Reading the Timer1 counter (`$Cn04`/`$Cn05`) is the most timing-critical access.
+Programs that auto-detect the card read it back-to-back and expect a fixed response
+time. It is answered from the 256-byte response table, which DMA keeps current, so a
+read returns the live count without needing to access a core first.
 
 ## License
 
 MIT (see `LICENSE`). This project also incorporates third-party components (in
 `firmware/vendor/` and a few `firmware/src/` files), each under its own MIT
-license; `LICENSE` lists them.
+license, stated in those files.

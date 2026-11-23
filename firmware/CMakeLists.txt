@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.13)
 
-# Production board: non-wireless Pico 2 (set before pico_sdk_init; local-pre.cmake may override).
+# Production board: non-wireless Pico 2 (set before pico_sdk_init, local-pre.cmake may override).
 set(PICO_BOARD pico2 CACHE STRING "Board type")
 include(${CMAKE_CURRENT_LIST_DIR}/local-pre.cmake OPTIONAL)
 
@@ -20,7 +20,6 @@ add_executable(mockingboard_pico
     src/mb_speech.c
     src/mb_speech_bus.c
     src/mb_version.c
-    src/mb_fastread.S
     vendor/emu2149/emu2149.c
     vendor/ssi263/ssi263.c
     vendor/ssi263/ssi263dsp.c
@@ -28,7 +27,7 @@ add_executable(mockingboard_pico
 
 pico_generate_pio_header(mockingboard_pico ${CMAKE_CURRENT_LIST_DIR}/src/mb_bus.pio)
 
-# Version header, regenerated each build from the top-level VERSION file + git state; rewritten
+# Version header, regenerated each build from the top-level VERSION file + git state. Rewritten
 # only when the value changes, so an unchanged version forces no relink.
 find_package(Git QUIET)
 set(MB_VERSION_GEN ${CMAKE_CURRENT_BINARY_DIR}/mb_version_gen.h)
@@ -71,8 +70,8 @@ target_link_libraries(mockingboard_pico
 # Run from RAM: no XIP/flash-fetch stalls in the per-sample audio path.
 pico_set_binary_type(mockingboard_pico copy_to_ram)
 
-# System clock. 200 MHz holds the slot read-response inside the 6502 window (150 MHz missed); the
-# PWM carrier and 50 kHz sample pacing derive from clk_sys, so this stays overridable.
+# System clock. The bus PIO settle delays are counted at 200 MHz. The PWM carrier and 50 kHz
+# sample pacing derive from clk_sys, so this stays overridable.
 set(MB_SYSCLK_KHZ 200000 CACHE STRING "System clock in kHz (200000 production)")
 target_compile_definitions(mockingboard_pico PRIVATE MB_SYSCLK_KHZ=${MB_SYSCLK_KHZ})
 
@@ -88,7 +87,7 @@ if(MB_PHI2_SELFTEST)
     target_compile_definitions(mockingboard_pico PRIVATE MB_PHI2_SELFTEST=1 MB_CORE1_GATED=1)
 endif()
 
-# Steady equal ~440 Hz tone on both channels via the AY path; any L/R difference is analog HW.
+# Steady equal ~440 Hz tone on both channels via the AY path. Any L/R difference is analog HW.
 option(MB_TONE_TEST "Steady equal tone on both channels via the AY/music path (HW test)" OFF)
 if(MB_TONE_TEST)
     target_compile_definitions(mockingboard_pico PRIVATE MB_TONE_TEST=1)
@@ -98,12 +97,6 @@ endif()
 option(SPEECH_SWAP_CH "Route SSI-263 speech to the opposite channel" OFF)
 if(SPEECH_SWAP_CH)
     target_compile_definitions(mockingboard_pico PRIVATE SPEECH_SWAP_CH=1)
-endif()
-
-# Default read drive = 0x00, so a read-response miss reads "not ready", never the floating bus.
-option(MB_FAILSAFE_READ "Fail-safe read state machine (never floats the data bus)" ON)
-if(MB_FAILSAFE_READ)
-    target_compile_definitions(mockingboard_pico PRIVATE MB_FAILSAFE_READ=1)
 endif()
 
 # Optional untracked local build extensions (local-post.cmake, absent in the standard tree).

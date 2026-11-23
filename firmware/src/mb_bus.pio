@@ -7,7 +7,8 @@
 .define PIN_IOSEL 16
 .define PIN_PHI0  18
 .define IRQ_WRITE  4          ; pio0 internal: addr SM -> write SM handshake
-.define IRQ_SYNC   0          ; pio1 base flag, raised as (0 + sm_num) via `rel`
+.define IRQ_READ   5          ; pio0 internal: raddr SM -> table read SM handshake
+.define IRQ_TICK   0          ; pio1/pio2 counter SMs: timer timed out, raised as (0 + sm_num)
 
 ; ---------------------------------------------------------------- addr
 .program mb_addr
@@ -16,7 +17,7 @@ idle:
     wait 1 gpio PIN_IOSEL
     wait 0 gpio PIN_IOSEL          ; our $Cn00 page is being accessed
     in pins, 10                    ; base GP8: A0-7, /IOSEL, R/W -> autopush(10)
-    jmp pin idle                   ; jmp_pin = R/W; read cycle -> idle
+    jmp pin idle                   ; jmp_pin = R/W, read cycle -> idle
     irq IRQ_WRITE                  ; write cycle -> wake the write SM
 .wrap
 
@@ -45,69 +46,14 @@ static inline void mb_write_cfg(pio_sm_config *c) {
 }
 %}
 
-; ---------------------------------------------------------------- read
-.program mb_read
-.wrap_target
-    pull block                     ; core pushes the byte to return
-    out pins, 8
-    mov pindirs, ~null             ; enable D0-7 as outputs
-    wait 1 gpio PIN_IOSEL          ; hold until /IOSEL rises
-    mov pindirs, null              ; release D0-7 (back to inputs)
-.wrap
-
-% c-sdk {
-static inline void mb_read_cfg(pio_sm_config *c) {
-    sm_config_set_out_pins(c, 0, 8);           // D0 = GP0
-    sm_config_set_out_shift(c, true, false, 8);
-}
-%}
-
-; ---------------------------------------------------------------- read (fail-safe, RP2350)
-; Drives a 0x00 default for the whole read, overwritten by core0's byte when it lands, so a
-; read-response miss reads 0 ("not ready") instead of the floating bus.
-.program mb_read_failsafe
-    set y, 2                       ; match {R/W = 1 (bit1), /IOSEL = 0 (bit0)}
-release:
-    mov pindirs, null
-    mov pins, null                 ; pre-stage 0x00 in the output latch
-idle:
-    wait 1 gpio PIN_IOSEL
-    wait 0 gpio PIN_IOSEL
-    mov x, pins                    ; x = {R/W, /IOSEL}, masked to 2 bits by in_count
-    jmp x!=y idle                  ; drive only a clean read
-chk:
-    mov x, ~status                 ; x = 0 iff TX FIFO empty
-    jmp !x drive
-    pull noblock                   ; drop a stale push from a prior access
-    jmp chk
-drive:
-    mov pindirs, ~null
-.wrap_target
-    pull noblock                   ; OSR = fresh byte, else X (held value; default 0)
-    mov pins, osr
-    mov x, osr
-    jmp pin release                ; /IOSEL high -> done
-.wrap
-
-% c-sdk {
-static inline void mb_read_failsafe_cfg(pio_sm_config *c) {
-    sm_config_set_out_pins(c, 0, 8);
-    sm_config_set_in_pins(c, 16);              // bit0 = /IOSEL (GP16), bit1 = R/W (GP17)
-    sm_config_set_in_pin_count(c, 2);
-    sm_config_set_jmp_pin(c, 16);
-    sm_config_set_mov_status(c, STATUS_TX_LESSTHAN, 1);
-}
-%}
-
-; ---------------------------------------------------------------- phi2 (readable-counter time base)
-; drift-free time base for the software Timer1/Timer2 counters; a DMA mirrors Y to a RAM word.
+; ---------------------------------------------------------------- phi2 (cycle count)
 .program mb_phi2
 .wrap_target
 phi2_loop:
     wait 1 gpio PIN_PHI0
-    wait 0 gpio PIN_PHI0           ; one full PHI2 cycle elapsed
+    wait 0 gpio PIN_PHI0
     in y, 32
-    jmp y-- phi2_loop              ; Y-- every cycle (wraps 0 -> 0xFFFFFFFF); loops either way
+    jmp y-- phi2_loop
 .wrap
 
 % c-sdk {
@@ -116,17 +62,137 @@ static inline void mb_phi2_cfg(pio_sm_config *c) {
 }
 %}
 
-; ---------------------------------------------------------------- sync (Timer1 tick)
-; two instances on pio1 (SM0 = VIA1, SM1 = VIA2); `rel` raises each SM's own flag, so independent.
-.program mb_sync
-    pull block                     ; OSR = PHI0-cycle count (the T1 latch value)
+; ---------------------------------------------------------------- raddr (reads only)
+; Pushes table base | A7 A6 A5 0 A3-A0. The 6522 does not decode A4.
+.program mb_raddr
 .wrap_target
-    mov x, osr
-loop:
-    wait 1 gpio PIN_PHI0 [31]
-    nop [31]
-    wait 0 gpio PIN_PHI0 [31]
-    nop [31]
-    jmp x-- loop                   ; count down N whole PHI0 cycles
-    irq IRQ_SYNC rel               ; free-run: wraps back and repeats with same N
+idle:
+    wait 1 gpio PIN_IOSEL
+    wait 0 gpio PIN_IOSEL
+    jmp pin read
+    jmp idle
+read:
+    irq IRQ_READ
+    mov osr, pins
+    in y, 24
+    out null, 5
+    in osr, 3
+    in null, 1
+    in pins, 4
 .wrap
+
+% c-sdk {
+static inline void mb_raddr_cfg(pio_sm_config *c) {
+    sm_config_set_in_pins(c, 8);               // A0 = GP8
+    sm_config_set_in_shift(c, false, true, 32);
+    sm_config_set_out_shift(c, true, false, 32);
+    sm_config_set_jmp_pin(c, 17);              // R/W
+}
+%}
+
+; ---------------------------------------------------------------- read (response table)
+; A byte already in the TX FIFO when the flag arrives is from an earlier read and is dropped.
+.program mb_read_table
+release:
+    mov pindirs, null
+    mov pins, null
+idle:
+    wait 1 irq IRQ_READ
+drain:
+    mov x, ~status                 ; X = 0 iff the TX FIFO is empty
+    jmp !x drive
+    pull noblock
+    jmp drain
+drive:
+    mov pindirs, ~null
+.wrap_target
+    pull noblock
+    mov pins, osr
+    mov x, osr
+    jmp pin release
+.wrap
+
+% c-sdk {
+static inline void mb_read_table_cfg(pio_sm_config *c) {
+    sm_config_set_out_pins(c, 0, 8);
+    sm_config_set_jmp_pin(c, 16);              // /IOSEL
+    sm_config_set_mov_status(c, STATUS_TX_LESSTHAN, 1);
+}
+%}
+
+; ---------------------------------------------------------------- 6522 Timer1 counter
+; Reloads the latch in both modes. The newest latch in the TX FIFO applies at the next reload.
+.program mb_t1
+public start:
+    pull block
+    mov y, osr
+    pull block
+    mov x, ~osr
+    jmp !x enter_under             ; $FFFFFFFF = start on the $FFFF cycle
+    mov x, osr
+    jmp count
+enter_under:
+    mov x, ~null
+    jmp under
+newer:
+    pull noblock
+    jmp drain
+.wrap_target
+count:
+    wait 1 gpio PIN_PHI0 [31]
+    wait 0 gpio PIN_PHI0
+    in x, 32
+    mov isr, x
+    mov osr, y
+drain:
+    mov x, status                  ; X = 0 iff a latch is waiting in the TX FIFO
+    jmp !x newer
+    mov y, osr
+    mov x, isr
+    jmp x-- count
+under:
+    wait 1 gpio PIN_PHI0 [31]
+    wait 0 gpio PIN_PHI0
+    in x, 32
+    irq IRQ_TICK rel
+    mov x, y
+.wrap
+
+% c-sdk {
+static inline void mb_t1_cfg(pio_sm_config *c) {
+    sm_config_set_in_shift(c, false, true, 32);
+    sm_config_set_mov_status(c, STATUS_TX_LESSTHAN, 1);
+}
+%}
+
+; ---------------------------------------------------------------- 6522 Timer2 counter
+; There is no reload. X is 32 bits, so it reaches 0 again only after 2^32 cycles.
+.program mb_t2
+public start:
+    pull block
+    mov x, ~osr
+    jmp !x enter_under
+    mov x, osr
+    jmp count
+enter_under:
+    mov x, ~null
+    jmp under
+.wrap_target
+count:
+    wait 1 gpio PIN_PHI0 [31]
+    wait 0 gpio PIN_PHI0
+    in x, 32
+    jmp x-- count
+under:
+    wait 1 gpio PIN_PHI0 [31]
+    wait 0 gpio PIN_PHI0
+    in x, 32
+    irq IRQ_TICK rel
+    jmp x-- count
+.wrap
+
+% c-sdk {
+static inline void mb_t2_cfg(pio_sm_config *c) {
+    sm_config_set_in_shift(c, false, true, 32);
+}
+%}

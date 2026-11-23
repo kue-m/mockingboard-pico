@@ -1,13 +1,12 @@
-/* Version readout: each Apple read of VIA1's Shift Register ($Cn0A) clocks out one byte of the version string. */
+/* An index write to VIA1 SR ($Cn0A) stages that byte of the page selected by VIA2 SR ($Cn8A). Never 0. */
 #pragma once
 
 #include <stdint.h>
-#include <stdbool.h>
 
-#define MB_VERSION_READ_LEN 32   // fixed field width, space-padded/truncated
+#define MB_VERSION_STR_LEN 32   // fixed field width, space-padded/truncated
 
-// auto-arms on first read. Does not advance (deferred to mb_version_advance, so an un-acked read is harmless)
-uint8_t mb_version_read_byte(void);
-bool mb_version_armed(void);
-void mb_version_advance(void);
-void mb_version_disarm(void);
+#define MB_INFO_PAGE_VERSION 0
+#define MB_INFO_NONE         0xFF
+
+void    mb_info_select_page(uint8_t page);
+uint8_t mb_info_stage(uint8_t index);

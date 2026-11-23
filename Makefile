@@ -33,7 +33,7 @@ prod:
 
 clean:
 	rm -rf $(DIST)
-	rm -rf $(SIM)/build $(SIM)/host $(SIM)/test $(SIM)/test_cov $(SIM)/test_ar $(SIM)/test_ar_cov $(SIM)/out.wav $(SIM)/out.mp3
+	rm -rf $(SIM)/build $(SIM)/out.wav $(SIM)/out.mp3
 
 help:
 	@sed -n '3,9p' $(firstword $(MAKEFILE_LIST))

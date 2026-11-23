@@ -1,7 +1,7 @@
 # Reproducible firmware build: `docker build -o dist .` runs the host tests and writes the UF2 to ./dist/.
 # Pins pico-sdk + picotool to 2.2.0. For a bit-for-bit build, pin the base image by digest first.
 
-FROM debian:bookworm-slim AS build
+FROM debian:bookworm-slim AS toolchain
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN rm -f /etc/dpkg/dpkg.cfg.d/docker
@@ -33,6 +33,14 @@ RUN git clone -b ${PICOTOOL_REF} --depth 1 https://github.com/raspberrypi/picoto
     && cmake --install /tmp/picotool/build \
     && rm -rf /tmp/picotool
 
+RUN cmake -S ${PICO_SDK_PATH}/tools/pioasm -B /tmp/pioasm -DPIOASM_VERSION_STRING=${PICO_SDK_REF} \
+    && cmake --build /tmp/pioasm -j"$(nproc)" \
+    && cp /tmp/pioasm/pioasm /usr/local/bin/ \
+    && rm -rf /tmp/pioasm
+
+FROM toolchain AS build
+# Fail the build, rather than skip the PIO tests, when pioasm is missing.
+ENV MB_REQUIRE_PIOASM=1
 WORKDIR /src
 COPY . .
 # Trust the copied repo so the version step can read git state.

@@ -68,7 +68,7 @@ static void request_and_ack(void) {
     post(0, 4, 0xE0);
     CHECK_SPEC(speech_ar(0), MBA " Test#6 (S4)", "an R4 (filter) write leaves the request");
     post(0, 1, 0x80);
-    KNOWN_DISCREPANCY(!speech_ar(0), MBA " Test#6 (S4/S5)", "an R1 write acknowledges the request");
+    CHECK_SPEC(!speech_ar(0), MBA " Test#6 (S4/S5)", "an R1 write acknowledges the request");
     post(0, 0, 0xC0);
     until_request(0, RATE);
     post(0, 2, 0xF0);

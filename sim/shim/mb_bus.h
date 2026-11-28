@@ -12,6 +12,7 @@
 void     mb_bus_irq(bool assert);
 uint8_t  mb_bus_get_wdata(void);
 uint32_t mb_phi2_ticks(void);
+static inline uint32_t mb_access_ticks(void) { return mb_phi2_ticks(); }   // host: no PHI0 pin to sample
 
 extern volatile uint8_t mb_rtable[256];
 bool mb_t1_arm(int chan, uint32_t w, uint16_t n);

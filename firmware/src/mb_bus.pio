@@ -152,9 +152,10 @@ drain:
     jmp x-- count
 under:
     wait 1 gpio PIN_PHI0 [31]
+    irq IRQ_TICK rel               ; raised ~330 ns before the PHI0 fall that ends the timeout cycle: core0 needs that
+                                   ; head start to get the IFR table byte in before the next cycle's read
     wait 0 gpio PIN_PHI0
     in x, 32
-    irq IRQ_TICK rel
     mov x, y
 .wrap
 
@@ -185,9 +186,9 @@ count:
     jmp x-- count
 under:
     wait 1 gpio PIN_PHI0 [31]
+    irq IRQ_TICK rel               ; early, as in mb_t1
     wait 0 gpio PIN_PHI0
     in x, 32
-    irq IRQ_TICK rel
     jmp x-- count
 .wrap
 

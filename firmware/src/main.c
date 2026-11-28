@@ -58,8 +58,10 @@ int main(void) {
     mb_bus_reset_handler(mb_via_reset);
     mb_bus_reset_start();
 
+    uint32_t turn = 0;
     while (true) {
-        mb_via_poll();
+        mb_via_poll_timers();
         if (mb_bus_access_pending()) mb_via_access(mb_bus_get_access());
+        if ((++turn & 15u) == 0) mb_via_poll_slow();
     }
 }

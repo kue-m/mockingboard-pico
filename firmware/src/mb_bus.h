@@ -22,6 +22,23 @@ static inline uint32_t mb_phi2_ticks(void) {
     return 0u - g_phi2_mirror;
 }
 
+
+// Cycle count of a write access, taken BEFORE this cycle's PHI0 fall is counted.
+// Reading the mirror at a fixed latency after /IOSEL races the PHI0 fall (core0 sometimes sees the access
+// just before it and sometimes just after), which made T2 read one cycle high (MB-audit 6522 test).
+// PHI0 high: the fall has not happened yet and the mirror update trails it by ~50 ns, so read now.
+// PHI0 low: the fall already happened; let the mirror catch up, then remove that edge from the count.
+#ifndef MB_HOST_SIM
+#include "hardware/gpio.h"
+static inline uint32_t mb_access_ticks(void) {
+    if (gpio_get(PIN_PHI0)) return mb_phi2_ticks();
+    busy_wait_at_least_cycles(32);
+    return mb_phi2_ticks() - 1u;
+}
+#else
+static inline uint32_t mb_access_ticks(void) { return mb_phi2_ticks(); }
+#endif
+
 extern volatile uint8_t mb_rtable[256];
 
 // *_arm loads n as if written on PHI2 cycle w, and returns true if its $FFFF cycle already passed.

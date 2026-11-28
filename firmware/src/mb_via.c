@@ -310,7 +310,9 @@ static void __not_in_flash_func(ar_edge)(int ch) {
 }
 
 // Timeouts first, so a read that clears a flag clears it after its timeout set it.
-void __not_in_flash_func(mb_via_poll)(void) {
+// Kept apart from the speech polling so the main loop can run it every turn: the delay from a timeout to the
+// IFR table byte is the loop turn time, and mb-audit T6522_10 reads IFR within ~1 cycle of that.
+void __not_in_flash_func(mb_via_poll_timers)(void) {
     uint32_t t = mb_timer_ticks();
     if (t) {
         for (int c = 0; c < 2; c++) {
@@ -318,6 +320,14 @@ void __not_in_flash_func(mb_via_poll)(void) {
             if (t & MB_TICK_T2(c)) t2_timeout(c);
         }
     }
+}
+
+void __not_in_flash_func(mb_via_poll)(void) {
+    mb_via_poll_timers();
+    mb_via_poll_slow();
+}
+
+void __not_in_flash_func(mb_via_poll_slow)(void) {
     for (int c = 0; c < 2; c++) {
 #if MB_SPEECH_AR_IRQ
         // An advance of the A/R edge count latches CA1, so a request already dropped is still caught.
@@ -369,7 +379,7 @@ void mb_via_init(void) {
 }
 
 void __not_in_flash_func(mb_via_access)(uint32_t acc) {
-    uint32_t cyc = mb_phi2_ticks();
+    uint32_t cyc = MB_ACC_IS_READ(acc) ? 0u : mb_access_ticks();
     uint8_t a   = MB_ACC_ADDR(acc);
     uint8_t sel = a & 0x60;                      // A6,A5 = SSI-263 chip select
     if (sel && !MB_ACC_IS_READ(acc)) {

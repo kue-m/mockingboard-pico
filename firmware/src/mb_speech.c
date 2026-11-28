@@ -86,7 +86,16 @@ void speech_init(int clockHz, int sampleRate) {
 
 /* track liveness from CTL so an un-driven chip is never run (CPU budget) */
 static void apply_write(int c, int reg, uint8_t v) {
+    // A write to reg1 de-asserts A/R, and the chip then repeats the current phoneme and raises A/R again when it
+    // completes (mb-audit SSI263 test 6, part 1). The emulator holds the request until reg0 is written, so no new
+    // edge would ever reach CA1: reload reg0 to restart the phoneme timer.
+    int req_before = (reg == 1) && chip[c] && ssi263_request(chip[c]);
     ssi263_write(chip[c], reg, v);
+    if (req_before && !ssi263_request(chip[c])) {
+        /* nothing: request dropped by the write itself */
+    } else if (req_before) {
+        ssi263_write(chip[c], 0, ssi263_reg(chip[c], 0));
+    }
     if (reg == SSI_R3_CTL) {
         uint8_t prevctl = g_prev_ctl[c]; g_prev_ctl[c] = v;
         if (v & 0x80) {
